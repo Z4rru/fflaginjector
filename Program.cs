@@ -136,11 +136,45 @@ sealed class MemEngine : IDisposable
     public void Dispose() => Detach();
 }
 
+static class FlagPrefix
+{
+    static readonly string[] _prefixes =
+    {
+        "DFString", "SFString", "FString",
+        "DFFlag", "SFFlag", "DFInt", "SFInt", "DFLog", "SFLog",
+        "FFlag", "FInt", "FLog"
+    };
+
+    public static ReadOnlySpan<string> All => _prefixes;
+
+    public static string Strip(string name)
+    {
+        foreach (var p in _prefixes)
+            if (name.Length > p.Length
+                && name.StartsWith(p, StringComparison.OrdinalIgnoreCase)
+                && char.IsUpper(name[p.Length]))
+                return name[p.Length..];
+        return name;
+    }
+
+    public static string DetectPrefix(string name)
+    {
+        foreach (var p in _prefixes)
+            if (name.Length > p.Length
+                && name.StartsWith(p, StringComparison.OrdinalIgnoreCase)
+                && char.IsUpper(name[p.Length]))
+                return p;
+        return "";
+    }
+}
+
 sealed class OffsetStore
 {
     readonly Dictionary<string, long> _map = new();
     readonly Dictionary<string, string> _ci = new(StringComparer.OrdinalIgnoreCase);
     readonly Dictionary<string, string> _norm = new(StringComparer.OrdinalIgnoreCase);
+    readonly Dictionary<string, string> _stripped = new(StringComparer.OrdinalIgnoreCase);
+    readonly Dictionary<string, string> _strippedNorm = new(StringComparer.OrdinalIgnoreCase);
     readonly List<string> _names = new();
     public IReadOnlyDictionary<string, long> Map => _map;
     public IReadOnlyList<string> Names => _names;
@@ -167,12 +201,20 @@ sealed class OffsetStore
         if (string.IsNullOrEmpty(body)) { Log?.Invoke("No offset data"); return false; }
         var ns = Regex.Match(body, @"namespace FFlags\s*\{([^}]+)\}", RegexOptions.Singleline);
         if (!ns.Success) { Log?.Invoke("Namespace not found"); return false; }
-        _map.Clear(); _ci.Clear(); _norm.Clear(); _names.Clear();
+        _map.Clear(); _ci.Clear(); _norm.Clear(); _stripped.Clear(); _strippedNorm.Clear(); _names.Clear();
         foreach (Match m in Regex.Matches(ns.Groups[1].Value, @"uintptr_t\s+(\w+)\s*=\s*(0x[0-9A-Fa-f]+);"))
         {
             if (!long.TryParse(m.Groups[2].Value.AsSpan(2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out long v)) continue;
             string n = m.Groups[1].Value;
-            _map[n] = v; _ci[n] = n; _norm[n.Replace("_", "")] = n; _names.Add(n);
+            _map[n] = v;
+            _ci[n] = n;
+            string nNorm = n.Replace("_", "");
+            if (!_norm.ContainsKey(nNorm)) _norm[nNorm] = n;
+            string s = FlagPrefix.Strip(n);
+            if (!_stripped.ContainsKey(s)) _stripped[s] = n;
+            string sNorm = s.Replace("_", "");
+            if (!_strippedNorm.ContainsKey(sNorm)) _strippedNorm[sNorm] = n;
+            _names.Add(n);
         }
         Log?.Invoke($"{_map.Count} offsets{(cached ? " (cached)" : "")}");
         return _map.Count > 0;
@@ -183,6 +225,15 @@ sealed class OffsetStore
         if (_map.ContainsKey(n)) return n;
         if (_ci.TryGetValue(n, out var a)) return a;
         if (_norm.TryGetValue(n.Replace("_", ""), out var b)) return b;
+        string s = FlagPrefix.Strip(n);
+        if (s != n)
+        {
+            if (_ci.TryGetValue(s, out var c)) return c;
+            if (_stripped.TryGetValue(s, out var d)) return d;
+            string sNorm = s.Replace("_", "");
+            if (_norm.TryGetValue(sNorm, out var e)) return e;
+            if (_strippedNorm.TryGetValue(sNorm, out var f)) return f;
+        }
         return null;
     }
 
@@ -562,12 +613,7 @@ sealed class MainForm : Form
         e.Graphics.DrawLine(pen, e.Bounds.Left, e.Bounds.Bottom - 1, e.Bounds.Right, e.Bounds.Bottom - 1);
     }
 
-        void LvDrawItem(object? s, DrawListViewItemEventArgs e)
-    {
-        // Do not paint background here — LvDrawSub already draws
-        // bg + text per cell.  Painting the full-row bg here blanks
-        // out text on hover because DrawSubItem isn't always re-fired.
-    }
+    void LvDrawItem(object? s, DrawListViewItemEventArgs e) { }
 
     void LvDrawSub(object? s, DrawListViewSubItemEventArgs e)
     {
@@ -769,7 +815,8 @@ sealed class MainForm : Form
         foreach (var n in _off.Names)
         {
             if (existing.Contains(n)) continue;
-            if (filter.Length > 0 && n.IndexOf(filter, StringComparison.OrdinalIgnoreCase) < 0) continue;
+            if (filter.Length > 0 && n.IndexOf(filter, StringComparison.OrdinalIgnoreCase) < 0
+                && FlagPrefix.Strip(n).IndexOf(filter, StringComparison.OrdinalIgnoreCase) < 0) continue;
             _lvTop.Items.Add(new ListViewItem(n) { ForeColor = Theme.Fg });
             count++;
         }
@@ -785,7 +832,8 @@ sealed class MainForm : Form
         for (int i = 0; i < _flags.Count; i++)
         {
             var f = _flags[i];
-            if (filter.Length > 0 && f.Name.IndexOf(filter, StringComparison.OrdinalIgnoreCase) < 0) continue;
+            if (filter.Length > 0 && f.Name.IndexOf(filter, StringComparison.OrdinalIgnoreCase) < 0
+                && FlagPrefix.Strip(f.Name).IndexOf(filter, StringComparison.OrdinalIgnoreCase) < 0) continue;
             string st = f.Enabled ? (f.Status == "" ? "Active" : f.Status) : "Disabled";
             if (_off.Count > 0 && _off.Resolve(f.Name) == null) st = "No Offset";
             var item = new ListViewItem(new[] { f.Name, f.Value, f.Type.ToString(), st });
